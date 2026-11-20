@@ -4,3 +4,10 @@
 @media(min-width:700px){.shell{padding-top:10px}nav{bottom:12px;border-radius:17px}}
 @media print{body,:root,.card{background:white}.shell{max-width:none;padding:0}.brand,nav,button,#toast,dialog,.no-print{display:none!important}.menu-day{break-inside:avoid}.heading{padding-top:0}.stack{gap:8px}footer{margin-top:12px}}
 .custom-portion{grid-column:1/-1}
+
+.photo-summary{background:#f4ecde;border-radius:10px;padding:10px 12px;font-size:13px;color:var(--brown)}
+.photo-summary strong{display:block;margin-bottom:6px;font-size:15px;color:var(--ink)}
+.photo-summary ul{margin:0;padding-left:1.2em;display:grid;gap:3px}
+#item-undo{align-items:center;gap:8px;flex-wrap:wrap}
+#item-undo:not([hidden]){display:flex}
+#item-undo button{min-height:36px;padding:5px 12px}
