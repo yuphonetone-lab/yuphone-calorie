@@ -1,12 +1,12 @@
-const cacheName = 'yufeng-calorie-v2';
+const cacheName = 'yufeng-calorie-v3';
 const assets = ['./', './index.html', './styles.css', './app.js', './foods.js', './model.js',
-  './storage.js', './vision.js', './manifest.json', './icon.svg'];
+  './storage.js', './vision.js', './manifest.json', './icon.svg', './icon-192.png', './icon-512.png'];
 const urls = new Set(assets.map(asset => new URL(asset, self.registration.scope).href));
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(cacheName).then(cache => cache.addAll(
     assets.map(asset => new Request(asset, { cache: 'reload' }))
-  )));
+  )).then(() => self.skipWaiting()));
 });
 self.addEventListener('activate', event => {
   event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key =>

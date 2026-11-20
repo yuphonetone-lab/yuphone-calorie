@@ -1,5 +1,5 @@
 import { foods, foodByName, categories } from './foods.js';
-import { meals, blank, dateKey, target, total, makeMenu } from './model.js';
+import { meals, blank, dateKey, target, total, makeMenu, itemEnergy } from './model.js';
 import { listMeals, putMeal, removeMeal, replaceMeals, compressPhoto } from './storage.js';
 import { recognize } from './vision.js';
 
@@ -212,6 +212,10 @@ function openEditor(date, meal, existing, preset = []) {
   let suggestions = [];
   let busy = false;
   let photoVersion = 0;
+  let currentId = existing?.id ?? '';
+  let lastRemoved = null;
+  let photoEnergy = null;
+  let persistTimer;
   editor.innerHTML = '<form><div class="row"><h2 id="editor-title">' + (existing ? '編輯餐點' : '記一餐') +
     '</h2><button type="button" data-close aria-label="關閉">關閉</button></div><div class="fields"><label>日期<input type="date" name="date" required value="' +
     date + '"></label><label>餐別<select name="meal">' + meals.map(m => option(m, m, meal)).join('') +
@@ -221,16 +225,58 @@ function openEditor(date, meal, existing, preset = []) {
     '<div id="photo-preview" class="stack"></div><p id="editor-status" class="note" role="status"></p></section>' +
     '<section class="stack"><h3>選擇食物</h3><div class="fields"><label>搜尋食物<input id="food-search" type="search" placeholder="例如：滷肉飯"></label>' +
     '<label>分類<select id="category">' + option('所有分類', '') + categories.map(c => option(c)).join('') + '</select></label></div>' +
-    '<div id="food-list" class="food-list" aria-label="食物建議清單"></div></section><section><h3>本餐食物</h3><div id="selected-items"></div></section>' +
+    '<div id="food-list" class="food-list" aria-label="食物建議清單"></div></section><section><h3>本餐食物</h3><div id="selected-items"></div><p id="item-undo" class="note" hidden></p></section>' +
     '<label>備註<textarea name="note" rows="2" maxlength="500">' + escape(existing?.note) + '</textarea></label>' +
     '<div class="editor-actions row"><strong id="meal-total" aria-live="polite"></strong><div class="buttons">' +
     (existing ? '<button type="button" class="danger" data-delete>刪除</button>' : '') + '<button class="primary" id="save-meal">儲存餐點</button></div></div></form>';
   const form = editor.querySelector('form');
   const status = message => { form.querySelector('#editor-status').textContent = message; };
+  const newId = () => globalThis.crypto?.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint32Array(4)), n => n.toString(16).padStart(8, '0')).join('-');
+  const storedItems = () => items.map(item => foodByName.has(item.name) ? { name: item.name, qty: item.qty } : { name: item.name, qty: item.qty, kcal: item.kcal });
+  const syncDeleteButton = () => {
+    if (!currentId || form.querySelector('[data-delete]')) return;
+    form.querySelector('.editor-actions .buttons').insertAdjacentHTML('afterbegin', '<button type="button" class="danger" data-delete>刪除</button>');
+  };
+  const persistMeal = async () => {
+    if (!items.length || items.some(item => !(item.qty > 0))) throw new Error('請加入食物並填寫有效份量。');
+    const values = new FormData(form);
+    const mealRecord = { id: currentId || newId(), date: values.get('date'), meal: values.get('meal'), note: values.get('note').trim(), photo, items: storedItems() };
+    if (!validDate(mealRecord.date)) throw new Error('請輸入有效日期。');
+    await putMeal(mealRecord);
+    currentId = mealRecord.id;
+    records = [...records.filter(m => m.id !== mealRecord.id), mealRecord];
+    if (page === 'history') selectedDate = mealRecord.date;
+    syncDeleteButton();
+    render();
+    return mealRecord;
+  };
+  const queuePersist = () => {
+    if (!currentId) return;
+    clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+      persistMeal().catch(() => toast('餐點儲存失敗，請檢查瀏覽器儲存空間。'));
+    }, 350);
+  };
+  const showUndo = () => {
+    const bar = form.querySelector('#item-undo');
+    if (!lastRemoved) { bar.hidden = true; bar.innerHTML = ''; return; }
+    bar.hidden = false;
+    bar.innerHTML = '已移除「' + escape(lastRemoved.item.name) + '」。 <button type="button" data-undo>復原</button>';
+  };
+  const showSummary = () => {
+    const box = form.querySelector('#photo-summary');
+    if (!box) return;
+    if (!photoEnergy) { box.innerHTML = ''; return; }
+    box.innerHTML = '<div class="photo-summary"><strong>這張照片約 ' + kcal(photoEnergy.total) + '</strong><ul>' +
+      photoEnergy.items.map(item => '<li>' + escape(item.name) + ' ' + item.qty + ' 份 · ' + kcal(itemEnergy(item)) +
+        (foodByName.has(item.name) ? '' : '（自訂）') + '</li>').join('') + '</ul></div>';
+  };
   const previewPhoto = () => {
     form.querySelector('#photo-preview').innerHTML = photo ? '<img class="editor-photo" src="' + photo + '" alt="餐點相片預覽">' +
+      '<div id="photo-summary"></div>' +
       '<div class="buttons"><button type="button" data-clear-photo>移除相片</button>' +
-      (key ? '<button type="button" data-ai>AI 辨識</button>' : '') + '</div>' : '';
+      (key ? '<button type="button" data-ai>重新辨識</button>' : '') + '</div>' : '';
+    showSummary();
   };
   const showFoods = () => {
     const q = form.querySelector('#food-search').value.trim().toLowerCase();
@@ -250,15 +296,58 @@ function openEditor(date, meal, existing, preset = []) {
     form.querySelector('#selected-items').innerHTML = items.map((item, i) => {
       const f = foodByName.get(item.name);
       const presets = [0.5, 1, 1.5, 2];
-      const custom = !presets.includes(item.qty);
-      return '<div class="selected-item"><span>' + f.name + '<small>' + f.portion + '</small></span>' +
-        '<label>份量<select data-portion="' + i + '" aria-label="' + f.name + '份量">' +
-        presets.map(p => option(p + ' 份', p, item.qty)).join('') + option('自訂', 'custom', custom ? 'custom' : item.qty) +
-        '</select></label><button type="button" data-remove="' + i + '" aria-label="移除' + f.name + '">移除</button>' +
-        '<label class="custom-portion"' + (custom ? '' : ' hidden') + '>自訂份數<input type="number" min="0.000001" max="20000" step="any" required' +
-        (custom ? '' : ' disabled') + ' data-qty="' + i + '" value="' + item.qty + '"></label></div>';
+      const customQty = !presets.includes(item.qty);
+      const label = f ? f.name : item.name;
+      const portion = f ? f.portion : '自訂估計';
+      return '<div class="selected-item"><span>' + escape(label) + '<small>' + escape(portion) +
+        (f ? '' : ' · 估計') + ' · ' + kcal(itemEnergy(item)) + '</small></span>' +
+        '<label>份量<select data-portion="' + i + '" aria-label="' + escape(label) + '份量">' +
+        presets.map(p => option(p + ' 份', p, item.qty)).join('') + option('自訂', 'custom', customQty ? 'custom' : item.qty) +
+        '</select></label><button type="button" data-remove="' + i + '" aria-label="移除' + escape(label) + '">移除</button>' +
+        '<label class="custom-portion"' + (customQty ? '' : ' hidden') + '>自訂份數<input type="number" min="0.000001" max="20000" step="any" required' +
+        (customQty ? '' : ' disabled') + ' data-qty="' + i + '" value="' + item.qty + '"></label></div>';
     }).join('') || '<p class="note">請從清單加入至少一項食物。</p>';
     updateTotal();
+    showUndo();
+  };
+  const applyRecognition = results => {
+    for (let i = items.length - 1; i >= 0; i--) if (items[i].fromAi) items.splice(i, 1);
+    for (const result of results) {
+      items.push(result.custom
+        ? { name: result.name, qty: result.qty, kcal: result.kcal, fromAi: true }
+        : { name: result.name, qty: result.qty, fromAi: true });
+    }
+    photoEnergy = { items: results, total: total(results).kcal };
+  };
+  const runRecognition = async version => {
+    if (!key || !photo) return;
+    setBusy(true);
+    status('正在辨識相片…');
+    try {
+      const results = await recognize(photo, settings, key);
+      if (!isOpen() || version !== photoVersion) return;
+      suggestions = results.filter(result => !result.custom);
+      form.querySelector('#food-search').value = '';
+      form.querySelector('#category').value = '';
+      if (results.length) {
+        applyRecognition(results);
+        showFoods();
+        showItems();
+        showSummary();
+        const record = await persistMeal();
+        if (!isOpen() || version !== photoVersion) return;
+        const when = record.date === dateKey() ? '今日' : record.date + ' ';
+        status('已辨識並記入' + when + record.meal + '，共 ' + kcal(total(items).kcal) + '。可調整份量或刪除單項。');
+        toast('已記入' + record.meal + '，共 ' + kcal(total(items).kcal));
+      } else {
+        showFoods();
+        status('沒有辨識到食物，可以手動搜尋後儲存。');
+      }
+    } catch (error) {
+      if (isOpen() && version === photoVersion) status(error.message + ' 你仍可手動搜尋食物。');
+    } finally {
+      if (isOpen() && version === photoVersion) setBusy(false);
+    }
   };
   const isOpen = () => editor.open && editor.contains(form);
   const setBusy = value => {
@@ -278,6 +367,7 @@ function openEditor(date, meal, existing, preset = []) {
     if (field.matches('[data-qty]')) {
       items[Number(field.dataset.qty)].qty = field.validity.valid ? Number(field.value) : 0;
       updateTotal();
+      if (items[Number(field.dataset.qty)].qty > 0) queuePersist();
     }
   });
   form.addEventListener('change', async event => {
@@ -292,6 +382,7 @@ function openEditor(date, meal, existing, preset = []) {
       else input.value = field.value;
       items[i].qty = Number(input.value);
       updateTotal();
+      if (items[i].qty > 0) queuePersist();
     }
     if (field.type !== 'file' || !field.files[0]) return;
     const file = field.files[0];
@@ -304,9 +395,15 @@ function openEditor(date, meal, existing, preset = []) {
       if (!isOpen() || version !== photoVersion) return;
       photo = compressed;
       suggestions = [];
+      photoEnergy = null;
       showFoods();
       previewPhoto();
-      status('相片已加入。');
+      if (key) {
+        status('相片已加入，正在自動辨識…');
+        await runRecognition(version);
+        return;
+      }
+      status('相片已加入。若要自動辨識熱量，請先在設定中加入 API 金鑰。');
     } catch {
       if (isOpen() && version === photoVersion) status('無法讀取這張相片，請改選瀏覽器支援的圖片。');
     } finally {
@@ -323,45 +420,42 @@ function openEditor(date, meal, existing, preset = []) {
       photoVersion++;
       photo = '';
       suggestions = [];
+      photoEnergy = null;
       showFoods();
       previewPhoto();
       status('');
       setBusy(false);
+      if (currentId) queuePersist();
     }
     if (d.food) {
-      const found = items.find(i => i.name === d.food);
+      const found = items.find(i => i.name === d.food && i.kcal == null);
       if (found) found.qty = Math.min(20000, Number((found.qty + 1).toPrecision(10)));
       else items.push({ name: d.food, qty: 1 });
       showItems();
       status('已加入' + d.food);
+      if (currentId) queuePersist();
     }
     if ('remove' in d) {
-      items.splice(Number(d.remove), 1);
+      const index = Number(d.remove);
+      lastRemoved = { item: items[index], index };
+      items.splice(index, 1);
       showItems();
+      if (currentId) queuePersist();
     }
-    if ('ai' in d && !busy) {
-      const version = photoVersion;
-      setBusy(true);
-      status('正在辨識相片…');
-      try {
-        const results = await recognize(photo, settings, key);
-        if (!isOpen() || version !== photoVersion) return;
-        suggestions = results;
-        form.querySelector('#food-search').value = '';
-        form.querySelector('#category').value = '';
-        showFoods();
-        status(results.length ? 'AI 建議已排在食物清單上方，請點選確認。' : '沒有找到可對應的食物，可以手動搜尋。');
-      } catch (error) {
-        if (isOpen() && version === photoVersion) status(error.message + ' 你仍可手動搜尋食物。');
-      } finally {
-        if (isOpen() && version === photoVersion) setBusy(false);
-      }
+    if ('undo' in d && lastRemoved) {
+      const index = Math.min(lastRemoved.index, items.length);
+      items.splice(index, 0, lastRemoved.item);
+      lastRemoved = null;
+      showItems();
+      status('已復原該項目。');
+      if (currentId) queuePersist();
     }
-    if ('delete' in d && !busy && confirm('確定刪除這筆餐點？')) {
+    if ('ai' in d && !busy) await runRecognition(photoVersion);
+    if ('delete' in d && !busy && currentId && confirm('確定刪除這筆餐點？')) {
       setBusy(true);
       try {
-        await removeMeal(existing.id);
-        records = records.filter(m => m.id !== existing.id);
+        await removeMeal(currentId);
+        records = records.filter(m => m.id !== currentId);
         if (isOpen()) editor.close();
         render();
         toast('已刪除餐點');
@@ -375,14 +469,15 @@ function openEditor(date, meal, existing, preset = []) {
     if (!items.length || items.some(item => !(item.qty > 0))) { toast('請加入食物並填寫有效份量。'); return; }
     const values = new FormData(form);
     const mealRecord = {
-      id: existing?.id ?? (globalThis.crypto?.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint32Array(4)), n => n.toString(16).padStart(8, '0')).join('-')),
+      id: currentId || (globalThis.crypto?.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint32Array(4)), n => n.toString(16).padStart(8, '0')).join('-')),
       date: values.get('date'), meal: values.get('meal'), note: values.get('note').trim(), photo,
-      items: items.map(item => ({ ...item }))
+      items: storedItems()
     };
     if (!validDate(mealRecord.date)) { toast('請輸入有效日期。'); return; }
     setBusy(true);
     try {
       await putMeal(mealRecord);
+      currentId = mealRecord.id;
       records = [...records.filter(m => m.id !== mealRecord.id), mealRecord];
       if (isOpen()) editor.close();
       if (page === 'history') selectedDate = mealRecord.date;
@@ -406,11 +501,13 @@ function backupRows(value) {
     if (!row || typeof row.id !== 'string' || !row.id || ids.has(row.id) || !validDate(row.date) ||
       !meals.includes(row.meal) || typeof row.note !== 'string' || row.note.length > 500 ||
       typeof row.photo !== 'string' || (row.photo && !photoPattern.test(row.photo)) ||
-      !Array.isArray(row.items) || !row.items.length || !row.items.every(item => item && foodByName.has(item.name) &&
-        Number.isFinite(item.qty) && item.qty > 0 && item.qty <= 20000)) throw new Error();
+      !Array.isArray(row.items) || !row.items.length || !row.items.every(item => item &&
+        typeof item.name === 'string' && item.name && item.name.length <= 80 &&
+        Number.isFinite(item.qty) && item.qty > 0 && item.qty <= 20000 &&
+        (foodByName.has(item.name) || (Number.isFinite(item.kcal) && item.kcal > 0 && item.kcal <= 20000)))) throw new Error();
     ids.add(row.id);
     return { id: row.id, date: row.date, meal: row.meal, note: row.note, photo: row.photo,
-      items: row.items.map(({name, qty}) => ({name, qty})) };
+      items: row.items.map(({name, qty, kcal}) => foodByName.has(name) ? {name, qty} : {name, qty, kcal}) };
   });
 }
 function exportBackup() {

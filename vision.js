@@ -1,4 +1,39 @@
 import { foods, foodByName } from './foods.js';
+import { roundHalf } from './model.js';
+
+const prompt = '辨識相片中可能的食物。只回傳 JSON 物件 {"foods":[{"name":"辨識名稱","confidence":0.8,"match":"資料庫名稱","servings":1,"kcal":260}]}。'
+  + '信心介於 0 與 1。match 請從下列名稱選擇最接近者，無對應時請留空字串。'
+  + 'servings 為相對資料庫一份的估計倍數（例如 0.5、1、1.5），無資料庫對應時以 1 表示相片中看到的一份。'
+  + 'kcal 為該項食物在相片中估計的熱量（大卡，整數）。資料庫名稱：'
+  + foods.map(f => f.name).join('、');
+
+export function parseRecognition(content) {
+  const text = String(content ?? '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  const list = JSON.parse(text).foods;
+  if (!Array.isArray(list)) throw new Error('辨識服務回傳的格式無法解析。');
+  return list.slice(0, 12).map(item => {
+    if (!item || typeof item !== 'object') return null;
+    const match = typeof item.match === 'string' ? item.match.trim() : '';
+    const detected = String(item.name ?? match).trim().slice(0, 80);
+    const confidence = Math.min(1, Math.max(0, Number(item.confidence) || 0));
+    const qty = roundHalf(item.servings, 1);
+    const seenKcal = Math.round(Number(item.kcal));
+    if (match && foodByName.has(match)) {
+      return { name: match, detected, confidence, qty, custom: false };
+    }
+    if (detected && Number.isFinite(seenKcal) && seenKcal > 0) {
+      return {
+        name: detected,
+        detected,
+        confidence,
+        qty,
+        kcal: Number((Math.min(20000, Math.max(1, seenKcal)) / qty).toFixed(4)),
+        custom: true
+      };
+    }
+    return null;
+  }).filter(Boolean);
+}
 
 export async function recognize(photo, settings, key) {
   if (!key || !photo) throw new Error('請先加入相片並設定金鑰。');
@@ -15,7 +50,7 @@ export async function recognize(photo, settings, key) {
       body: JSON.stringify({
         model: settings.model,
         messages: [{ role: 'user', content: [
-          { type: 'text', text: '辨識相片中可能的食物。只回傳 JSON 物件 {"foods":[{"name":"辨識名稱","confidence":0.8,"match":"資料庫名稱"}]}。信心介於 0 與 1，match 請從下列名稱選擇，無對應時留空：' + foods.map(f => f.name).join('、') },
+          { type: 'text', text: prompt },
           { type: 'image_url', image_url: { url: photo } }
         ] }]
       })
@@ -29,10 +64,7 @@ export async function recognize(photo, settings, key) {
   }
   try {
     const body = await response.json();
-    const content = body.choices[0].message.content.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-    return JSON.parse(content).foods.slice(0, 12).filter(item => item && foodByName.has(item.match))
-      .map(item => ({ name: item.match, detected: String(item.name ?? item.match).slice(0, 80),
-        confidence: Math.min(1, Math.max(0, Number(item.confidence) || 0)) }));
+    return parseRecognition(body.choices[0].message.content);
   } catch {
     throw new Error('辨識服務回傳的格式無法解析。');
   }

@@ -19,11 +19,22 @@ export function target(s) {
   return { bmr, tdee, kcal, complete, minimum,
     warning: Boolean((complete && s.mode === 'loss' && tdee - 500 < minimum && !+s.manual) || (+s.manual && s.sex && kcal < minimum)) };
 }
+export function roundHalf(value, fallback = 0.5) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(20000, Math.max(0.5, Math.round(n * 2) / 2));
+}
+export function itemEnergy(item) {
+  const food = foodByName.get(item.name);
+  if (food) return food.kcal * item.qty;
+  return (Number(item.kcal) || 0) * item.qty;
+}
 export function total(items) {
   const result = Object.fromEntries(nutrients.map(key => [key, 0]));
-  for (const { name, qty } of items) {
-    const food = foodByName.get(name);
-    if (food) for (const key of nutrients) result[key] += food[key] * qty;
+  for (const item of items) {
+    const food = foodByName.get(item.name);
+    if (food) for (const key of nutrients) result[key] += food[key] * item.qty;
+    else if (Number.isFinite(Number(item.kcal))) result.kcal += Number(item.kcal) * item.qty;
   }
   return result;
 }
@@ -52,7 +63,7 @@ export function makeMenu(goal, seed) {
     const names = pool[day].split('/');
     const base = total(names.map(name => ({ name, qty: 1 }))).kcal;
     const ratio = goal * [0.24, 0.32, 0.31, 0.13][i] / base;
-    const qty = Number(ratio.toPrecision(3));
+    const qty = roundHalf(ratio);
     return names.map(name => ({ name, qty }));
   }));
 }
